@@ -2,9 +2,12 @@
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks.Dataflow;
 using MBW.Tools.RabbitDump.Options;
+using MBW.Tools.RabbitDump.Utilities;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 
 namespace MBW.Tools.RabbitDump.Movers.Zip
 {
@@ -20,16 +23,25 @@ namespace MBW.Tools.RabbitDump.Movers.Zip
             _zip = new ZipArchive(zipFs, ZipArchiveMode.Read);
         }
 
-        public IEnumerable<MessageItem> GetData()
+        public override void Dispose()
+        {
+            _zip.Dispose();
+        }
+
+        public void SendData(ITargetBlock<MessageItem> target, CancellationToken cancellationToken)
         {
             using (MemoryStream msBuffer = new MemoryStream())
             {
                 _logger.LogDebug("Reading {FilesCount} files ({Count} messages) from zip file", _zip.Entries.Count, _zip.Entries.Count / 2);
 
-                foreach (ZipArchiveEntry entry in _zip.Entries)
+                var entries = _zip.Entries
+                    .Where(s => s.Name.EndsWith(DataExtension, StringComparison.Ordinal))
+                    .Select(s => s.FullName)
+                    .OrderBy(s => s);
+
+                foreach (string name in entries)
                 {
-                    if (!entry.Name.EndsWith(DataExtension, StringComparison.Ordinal))
-                        continue;
+                    ZipArchiveEntry entry = _zip.GetEntry(name);
 
                     byte[] data;
                     using (Stream fs = entry.Open())
@@ -43,20 +55,17 @@ namespace MBW.Tools.RabbitDump.Movers.Zip
 
                     MessageItem mi;
                     using (Stream fs = metaEntry.Open())
-                    using (StreamReader sr = new StreamReader(fs, Encoding))
-                    using (JsonTextReader tr = new JsonTextReader(sr))
-                        mi = Serializer.Deserialize<MessageItem>(tr);
+                        mi = Serialization.Deserialize<MessageItem>(fs);
 
                     mi.Data = data;
 
-                    yield return mi;
+                    target.Post(mi);
                 }
             }
         }
 
-        public override void Dispose()
+        public void Acknowledge(ICollection<MessageItem> items)
         {
-            _zip.Dispose();
         }
     }
 }
